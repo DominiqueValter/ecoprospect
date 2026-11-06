@@ -18,8 +18,8 @@ O **EcoProspect** é uma plataforma SaaS _multi-tenant_ desenvolvida para monito
 ## Status do Desenvolvimento (Roadmap)
 
 - [x] **Bloco 1 — Coleta e Armazenamento Bruto (DIOE/PR):** Ingestão resiliente da API e fallback via PDF para tabela PostgreSQL `publicacoes_brutas`.
-- [ ] **Bloco 2 — Tratamento, Normalização e Deduplicação:** Estruturação de `empresas` e `licencas` com busca textual otimizada.
-- [ ] **Bloco 3 — Controle de Validade e Vencimentos:** Regras de 120 dias (Decreto 9.541/2025) e identificação de renovações.
+- [x] **Bloco 2 — Tratamento, Normalização e Deduplicação:** Estruturação de `empresas` e `licencas` com busca textual otimizada.
+- [x] **Bloco 3 — Controle de Validade e Vencimentos:** Regras de 120 dias (Decreto 9.541/2025) e identificação de renovações.
 - [ ] **Bloco 4 — Inteligência Comercial:** Scoring de oportunidade por perfil de serviços.
 - [ ] **Bloco 5 — Pesquisa Automática de Contatos:** Enriquecimento de contatos comerciais públicos.
 - [ ] **Bloco 6 — Gestão de Oportunidades & Pipeline:** Gestão multi-tenant de leads.
