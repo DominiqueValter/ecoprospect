@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, Date, DateTime, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Text, Date, DateTime, Boolean, UniqueConstraint, Index
 from app.database.connection import Base
 
 
@@ -23,11 +23,16 @@ class PublicacaoBruta(Base):
     link_edicao_pdf = Column(String(500))
     
     hash_conteudo = Column(String(64), nullable=False, unique=True, index=True)
+    
+    # Campo para controle de alta performance no Bloco 2
+    processado = Column(Boolean, default=False, nullable=False, index=True)
+    
     criado_em = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     __table_args__ = (
         UniqueConstraint('id_materia', 'id_edicao', name='uq_materia_edicao'),
+        Index('idx_publicacao_pendente', 'processado', 'data_edicao'),
     )
 
     def __repr__(self):
-        return f"<PublicacaoBruta(id_materia='{self.id_materia}', data_edicao='{self.data_edicao}')>"
+        return f"<PublicacaoBruta(id_materia='{self.id_materia}', processado={self.processado})>"
