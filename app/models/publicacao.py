@@ -4,7 +4,7 @@ from app.database.connection import Base
 
 
 class PublicacaoBruta(Base):
-    """Modelo ORM para armazenar os dados brutos de matérias do DIOE-PR."""
+    """Modelo ORM para armazenar os dados brutos de matérias do DIOE-PR com auditoria de ingestão."""
     __tablename__ = "publicacoes_brutas"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -24,15 +24,20 @@ class PublicacaoBruta(Base):
     
     hash_conteudo = Column(String(64), nullable=False, unique=True, index=True)
     
-    # Campo para controle de alta performance no Bloco 2
+    # Compatibilidade mantida com código anterior
     processado = Column(Boolean, default=False, nullable=False, index=True)
+    
+    # Novos campos de gestão de estados e auditoria de erros (Etapa 1)
+    status_processamento = Column(String(50), default="PENDENTE", nullable=False, index=True)  # PENDENTE, PROCESSADA, REVISAO_MANUAL, ERRO
+    motivo_revisao = Column(Text, nullable=True)
+    processado_em = Column(DateTime, nullable=True)
     
     criado_em = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     __table_args__ = (
         UniqueConstraint('id_materia', 'id_edicao', name='uq_materia_edicao'),
-        Index('idx_publicacao_pendente', 'processado', 'data_edicao'),
+        Index('idx_publicacao_status_data', 'status_processamento', 'data_edicao'),
     )
 
     def __repr__(self):
-        return f"<PublicacaoBruta(id_materia='{self.id_materia}', processado={self.processado})>"
+        return f"<PublicacaoBruta(id_materia='{self.id_materia}', status='{self.status_processamento}')>"
