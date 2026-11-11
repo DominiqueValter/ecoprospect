@@ -1,153 +1,118 @@
-# scripts/buscar_empresas.py
+"""
+Resolve o CNPJ de uma empresa pela razão social + município, usando a tabela
+cnpj_base (Dados Abertos da Receita, ver importar_base_cnpj.py).
 
-import json
-import random
-import time
-import urllib.parse
-import urllib.request
-from datetime import datetime, timezone
-from html.parser import HTMLParser
+Substitui a versão antiga, que raspava o DuckDuckGo: buscadores devolvem desafio
+anti-robô (Google/Bing) ou nada (DuckDuckGo), e o resultado vinha sempre vazio.
 
-from app.database.connection import SessionLocal
-from app.models.empresa import Empresa  # ajuste para o caminho real do seu modelo
+Ordem de tentativa (sempre dentro da UF e, se houver, do município):
+  1. razão social normalizada idêntica
+  2. razão social sem forma jurídica (LTDA, ME, EIRELI...) e sem CPF final (MEI)
+  3. nome fantasia normalizado
+Aceita só quando os candidatos pertencem a UMA empresa (mesmo cnpj_basico);
+com mais de uma, devolve REVISAO_IDENTIDADE e lista os CNPJs no motivo.
 
+Uso avulso (só mostra, não grava):
+  python -m app.services.enriquecimento.resolver_cnpj "PFD LOTEAMENTOS E INCORPORAÇÕES LTDA" TOLEDO
+"""
+import sys
+from dataclasses import dataclass, field
 
-class DuckDuckGoParser(HTMLParser):
-    """Extrai título, link e resumo da página HTML de resultados."""
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
-    def __init__(self):
-        super().__init__()
-        self.items = []
-        self.current = None
-        self.in_title = False
-        self.in_snippet = False
+from app.models.cnpj_base import CnpjBase
+from app.services.enriquecimento.normalizacao import normalizar, raiz
 
-    def handle_starttag(self, tag, attrs):
-        attrs = dict(attrs)
-        classes = attrs.get("class", "").split()
-
-        if tag == "a" and "result__a" in classes:
-            self.current = {
-                "titulo": "",
-                "url": attrs.get("href", ""),
-                "resumo": "",
-            }
-            self.in_title = True
-
-        elif self.current and "result__snippet" in classes:
-            self.in_snippet = True
-
-    def handle_data(self, data):
-        if not self.current:
-            return
-
-        text = data.strip()
-        if not text:
-            return
-
-        if self.in_title:
-            self.current["titulo"] += text + " "
-        elif self.in_snippet:
-            self.current["resumo"] += text + " "
-
-    def handle_endtag(self, tag):
-        if tag == "a" and self.in_title:
-            self.in_title = False
-            if self.current:
-                self.items.append(self.current)
-                self.current = None
-
-        if tag in ("div", "span") and self.in_snippet:
-            self.in_snippet = False
+MUNICIPIO_DESCONHECIDO = {"", "NAO INFORMADO"}
 
 
-def pesquisar(consulta, limite=6):
-    url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode(
-        {"q": consulta}
-    )
-    request = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            "Accept-Language": "pt-BR,pt;q=0.9",
-        },
-    )
-
-    with urllib.request.urlopen(request, timeout=25) as response:
-        html = response.read().decode("utf-8", errors="replace")
-
-    parser = DuckDuckGoParser()
-    parser.feed(html)
-    return parser.items[:limite]
+@dataclass
+class ResultadoResolucao:
+    status: str                      # ENCONTRADO, SEM_CNPJ, REVISAO_IDENTIDADE, BASE_VAZIA
+    cnpj: str | None = None
+    criterio: str | None = None
+    motivo: str | None = None
+    registro: CnpjBase | None = None
+    candidatos: list[str] = field(default_factory=list)
 
 
-def montar_consultas(empresa):
-    nome = empresa.razao_social.strip()
-    local = f"{empresa.municipio} {empresa.uf}".strip()
+def base_carregada(db: Session, uf: str) -> bool:
+    return db.execute(select(CnpjBase.cnpj).where(CnpjBase.uf == uf).limit(1)).first() is not None
 
-    return [
-        f'"{nome}" "{local}" CNPJ',
-        f'"{nome}" "{local}" telefone email',
-        f'"{nome}" "{local}" endereço',
-        f'"{nome}" "{local}" site:gov.br',
+
+def _escolher(registros):
+    """Prefere matriz ativa; depois qualquer ativa; depois a primeira."""
+    return sorted(
+        registros,
+        key=lambda r: (r.situacao_cadastral != "02", not r.matriz, r.cnpj),
+    )[0]
+
+
+def resolver_cnpj(db: Session, razao_social: str, municipio: str | None, uf: str = "PR") -> ResultadoResolucao:
+    uf = (uf or "PR").upper()
+    if not base_carregada(db, uf):
+        return ResultadoResolucao(
+            status="BASE_VAZIA",
+            motivo=f"cnpj_base sem dados da UF {uf}: rode importar_base_cnpj.py",
+        )
+
+    mun = normalizar(municipio or "")
+    criterios = [
+        ("RAZAO_SOCIAL", CnpjBase.razao_normalizada, normalizar(razao_social)),
+        ("RAZAO_SEM_FORMA_JURIDICA", CnpjBase.razao_raiz, raiz(razao_social)),
+        ("NOME_FANTASIA", CnpjBase.fantasia_normalizada, normalizar(razao_social)),
     ]
+
+    for nome_criterio, coluna, valor in criterios:
+        if not valor:
+            continue
+        consulta = select(CnpjBase).where(CnpjBase.uf == uf, coluna == valor)
+        if mun not in MUNICIPIO_DESCONHECIDO:
+            consulta = consulta.where(CnpjBase.municipio_normalizado == mun)
+        registros = db.execute(consulta.limit(50)).scalars().all()
+        if not registros:
+            continue
+
+        empresas = {r.cnpj_basico for r in registros}
+        if len(empresas) == 1:
+            escolhido = _escolher(registros)
+            return ResultadoResolucao(
+                status="ENCONTRADO",
+                cnpj=escolhido.cnpj,
+                criterio=nome_criterio,
+                registro=escolhido,
+                candidatos=[r.cnpj for r in registros],
+            )
+        cnpjs = sorted(_escolher([r for r in registros if r.cnpj_basico == b]).cnpj for b in empresas)
+        return ResultadoResolucao(
+            status="REVISAO_IDENTIDADE",
+            criterio=nome_criterio,
+            motivo=f"{len(empresas)} empresas com o mesmo nome ({nome_criterio}): {', '.join(cnpjs[:10])}",
+            candidatos=cnpjs,
+        )
+
+    local = f"{municipio}/{uf}" if mun not in MUNICIPIO_DESCONHECIDO else uf
+    return ResultadoResolucao(status="SEM_CNPJ", motivo=f"Nome não encontrado na base da Receita em {local}")
+
+
+def buscar_na_base(db: Session, cnpj: str) -> CnpjBase | None:
+    return db.get(CnpjBase, cnpj)
 
 
 def main():
-    db = SessionLocal()
+    if len(sys.argv) < 2:
+        sys.exit(__doc__)
+    from app.database.connection import SessionLocal
 
-    try:
-        empresas = (
-            db.query(Empresa)
-            .filter(
-                Empresa.tipo_titular == "PJ",
-                Empresa.elegivel_prospeccao == "ELEGIVEL",
-            )
-            .order_by(Empresa.id)
-            .all()
-        )
-
-        print(f"Empresas selecionadas: {len(empresas)}")
-
-        with open("resultados_busca.jsonl", "a", encoding="utf-8") as arquivo:
-            for numero, empresa in enumerate(empresas, start=1):
-                print(
-                    f"[{numero}/{len(empresas)}] "
-                    f"{empresa.razao_social} — {empresa.municipio}/{empresa.uf}"
-                )
-
-                resultados_por_url = {}
-
-                for consulta in montar_consultas(empresa):
-                    try:
-                        for resultado in pesquisar(consulta):
-                            link = resultado.get("url", "").strip()
-                            if link:
-                                resultados_por_url[link] = resultado
-                    except Exception as erro:
-                        print(f"  Falha na consulta {consulta!r}: {erro}")
-
-                    # Não faça consultas em sequência rápida.
-                    time.sleep(random.uniform(2.5, 4.5))
-
-                registro = {
-                    "empresa_id": empresa.id,
-                    "razao_social": empresa.razao_social,
-                    "municipio": empresa.municipio,
-                    "uf": empresa.uf,
-                    "pesquisado_em": datetime.now(timezone.utc).isoformat(),
-                    "resultados": list(resultados_por_url.values()),
-                }
-
-                arquivo.write(json.dumps(registro, ensure_ascii=False) + "\n")
-                arquivo.flush()
-                print(f"  Links coletados: {len(resultados_por_url)}")
-
-    finally:
-        db.close()
+    razao = sys.argv[1]
+    municipio = sys.argv[2] if len(sys.argv) > 2 else None
+    uf = sys.argv[3] if len(sys.argv) > 3 else "PR"
+    with SessionLocal() as db:
+        r = resolver_cnpj(db, razao, municipio, uf)
+    print(f"status={r.status} cnpj={r.cnpj} criterio={r.criterio}")
+    if r.motivo:
+        print(f"motivo: {r.motivo}")
 
 
 if __name__ == "__main__":
